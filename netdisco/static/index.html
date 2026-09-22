@@ -1,0 +1,160 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Network Discovery</title>
+<link rel="icon" href="data:,">
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<header class="top">
+  <div class="brand">
+    <svg class="logo" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="2.5"/><path d="M5.6 5.6a9 9 0 0 0 0 12.8M18.4 5.6a9 9 0 0 1 0 12.8M8.5 8.5a5 5 0 0 0 0 7M15.5 8.5a5 5 0 0 1 0 7"/></svg>
+    <div>
+      <h1>Network Discovery</h1>
+      <p class="sub" id="netline">Checking your connection…</p>
+    </div>
+  </div>
+  <nav class="tabs" aria-label="Views">
+    <a href="#/" data-view="dashboard">Dashboard</a>
+    <a href="#/survey" data-view="survey">Wi-Fi survey</a>
+    <a href="#/sessions" data-view="sessions">Connected <span class="badge" id="sesscount" hidden></span></a>
+  </nav>
+  <div class="top-actions">
+    <span class="updated" id="updated"></span>
+    <button class="icon-btn" id="theme" title="Switch light/dark theme" aria-label="Switch theme">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/></svg>
+    </button>
+  </div>
+</header>
+
+<div class="banner" id="banner" hidden></div>
+
+<main id="view-dashboard" class="view">
+  <section aria-labelledby="h-health">
+    <h2 id="h-health">Network health</h2>
+    <div class="cards" id="cards">
+      <article class="card" id="card-internet"></article>
+      <article class="card" id="card-gateway"></article>
+      <article class="card" id="card-dns"></article>
+      <article class="card" id="card-wifi"></article>
+    </div>
+  </section>
+
+  <section aria-labelledby="h-devices" class="devices">
+    <div class="section-head">
+      <h2 id="h-devices">Devices on <span id="netname">your network</span> <span class="count" id="devcount"></span></h2>
+      <div class="scanbox">
+        <div class="scanstate" id="scanstate" aria-live="polite"></div>
+        <button class="btn primary" id="scan">Scan now</button>
+      </div>
+    </div>
+    <div class="progress" id="progress" hidden><div class="bar" id="bar"></div></div>
+
+    <div class="toolbar">
+      <div class="chips" id="chips" role="group" aria-label="Filter by device type"></div>
+      <input type="search" id="search" placeholder="Search name, IP, MAC, maker…" aria-label="Search devices">
+    </div>
+
+    <div class="table-wrap">
+      <table id="devtable">
+        <thead>
+          <tr>
+            <th data-sort="category">Type</th>
+            <th data-sort="name">Name</th>
+            <th data-sort="ip" class="sorted">IP address</th>
+            <th data-sort="ping" title="Round-trip time from this computer, refreshed every 5 seconds">Ping</th>
+            <th data-sort="mac">MAC address</th>
+            <th data-sort="vendor">Maker</th>
+            <th data-sort="model">Model / OS</th>
+            <th data-sort="confidence">Confidence</th>
+            <th><span class="sr">Actions</span></th>
+          </tr>
+        </thead>
+        <tbody id="devbody"></tbody>
+      </table>
+      <p class="empty" id="empty" hidden>No devices match.</p>
+    </div>
+  </section>
+</main>
+
+<main id="view-survey" class="view" hidden>
+  <div class="section-head">
+    <div>
+      <h2>Wi-Fi survey</h2>
+      <p class="lede">Walk around with this laptop. The meter updates every second; mark each spot you check.</p>
+    </div>
+    <span class="scanstate" id="survey-mode"></span>
+  </div>
+  <div class="survey-grid">
+    <article class="panel meter-panel" id="meter-panel"></article>
+    <article class="panel" id="survey-stats"></article>
+  </div>
+  <article class="panel chart-panel">
+    <div class="panel-head"><h3>Signal, last 3 minutes</h3><span class="dim small" id="roam-note"></span></div>
+    <div id="survey-chart" class="chart"></div>
+  </article>
+  <article class="panel">
+    <div class="panel-head">
+      <h3>Marked spots</h3>
+      <div class="mark-form">
+        <input type="text" id="mark-label" placeholder="Where are you? e.g. Conference room" maxlength="80" aria-label="Location name">
+        <button class="btn primary" id="mark-btn">Mark this spot</button>
+        <button class="btn" id="mark-export">Export CSV</button>
+        <button class="btn ghost" id="mark-clear">Clear</button>
+      </div>
+    </div>
+    <div class="table-wrap flat">
+      <table>
+        <thead><tr><th>Location</th><th>Signal</th><th>Quality</th><th>SNR</th><th>Link rate</th><th>Access point (BSSID)</th><th>Channel</th><th>Time</th></tr></thead>
+        <tbody id="marks"></tbody>
+      </table>
+      <p class="empty" id="marks-empty">No spots marked yet. Type a location name and press “Mark this spot”.</p>
+    </div>
+  </article>
+</main>
+
+<main id="view-sessions" class="view" hidden>
+  <h2>Connected devices</h2>
+  <p class="lede">Devices you've signed in to. Sessions close after 15 minutes idle; passwords are never stored.</p>
+  <div id="session-list"></div>
+</main>
+
+<main id="view-device" class="view" hidden></main>
+
+<dialog id="connect-dlg" aria-labelledby="connect-title">
+  <form id="connect-form" method="dialog" autocomplete="off">
+    <h3 id="connect-title">Connect to device</h3>
+    <p class="dim small" id="connect-sub"></p>
+    <div class="seg" role="radiogroup" aria-label="Connection method">
+      <label><input type="radio" name="method" value="ssh" checked> SSH</label>
+      <label><input type="radio" name="method" value="synology"> Synology (web)</label>
+    </div>
+    <p class="hint" id="method-hint"></p>
+    <div class="grid2">
+      <label>Host<input name="host" required></label>
+      <label>Port<input name="port" inputmode="numeric" pattern="\d{1,5}"></label>
+    </div>
+    <label>Username<input name="username" required autocomplete="username"></label>
+    <label>Password<input name="password" type="password" autocomplete="current-password"></label>
+    <label id="otp-wrap">One-time code <span class="dim">(if your device uses 2-step verification)</span>
+      <input name="otp" inputmode="numeric" autocomplete="one-time-code" maxlength="10" placeholder="123456"></label>
+    <label class="check" id="trust-wrap" hidden><input type="checkbox" name="trust_new_key"> I know this device's SSH key changed — trust the new key</label>
+    <div class="form-msg" id="connect-msg" role="alert" hidden></div>
+    <p class="dim small">Your password is used only to sign in and is never saved. All checks are read-only.</p>
+    <div class="dlg-actions">
+      <button type="button" class="btn" id="connect-cancel">Cancel</button>
+      <button type="submit" class="btn primary" id="connect-go">Connect &amp; check</button>
+    </div>
+  </form>
+</dialog>
+
+<div class="tooltip" id="tooltip" role="tooltip" hidden></div>
+<script src="/common.js"></script>
+<script src="/dashboard.js"></script>
+<script src="/survey.js"></script>
+<script src="/device.js"></script>
+<script src="/app.js"></script>
+</body>
+</html>
