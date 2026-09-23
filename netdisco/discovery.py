@@ -185,7 +185,10 @@ def icmp_alive(targets: list[str], progress=None) -> set[str]:
         use_socket = True
         for i in range(0, len(todo), 256):
             chunk = todo[i:i + 256]
-            got = pinger.icmp_sweep(chunk, timeout=1.2) if use_socket else None
+            errs: dict = {}
+            got = pinger.icmp_sweep(chunk, timeout=1.2, send_errors=errs) if use_socket else None
+            if got is not None and len([e for e in errs.values() if e in pinger.BLOCKED_ERRNOS]) > len(chunk) // 2:
+                got = None          # the OS is refusing our packets (macOS Local Network privacy): use system ping
             if got is None:
                 use_socket = False
                 with ThreadPoolExecutor(64) as ex:

@@ -291,6 +291,11 @@ async function pollPings() {
   try {
     const r = await api("/api/pings");
     Dash.pings = r.results || {}; Dash.pingTh = r.thresholds || Dash.pingTh;
+    if (r.lan_blocked && !Dash.lanWarned) {
+      Dash.lanWarned = true;
+      showBanner(`<b>macOS is blocking this app from reaching devices on your network.</b> Ping times now come from the system <span class="mono">ping</span> tool, but port checks (and so device types) and Connect won't work until you allow it:
+        System Settings › Privacy &amp; Security › <b>Local Network</b> › turn on <b>Terminal</b> (or Python), then quit Terminal and start Network Discovery again.`, 60000);
+    }
     if (App.current === "dashboard") updatePingCells();
   } catch (e) {}
   setTimeout(pollPings, 5000);

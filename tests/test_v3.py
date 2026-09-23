@@ -343,6 +343,47 @@ class SSHRouter(unittest.TestCase):
         self.assertTrue(any("Home Guest" in f["title"] for f in r["findings"]))
 
 
+class LocalNetworkBlocked(unittest.TestCase):
+    def test_pinger_falls_back_to_system_ping(self):
+        from netdisco import pinger
+
+        class Scans:
+            def snapshot(self):
+                return {"devices": [{"ip": ip, "online": True, "ports": [5000]} for ip in
+                                    ("192.168.1.1", "192.168.1.3", "192.168.1.16", "192.168.1.41")]}
+
+        def sweep(ips, timeout=1.5, send_errors=None):
+            for ip in ips[1:]:
+                send_errors[ip] = 65                       # EHOSTUNREACH: blocked by macOS
+            return {"192.168.1.1": 8.5}
+
+        p = pinger.DevicePinger(Scans())
+        with mock.patch.object(pinger, "icmp_sweep", side_effect=sweep), \
+             mock.patch.object(pinger.health, "icmp_ping", side_effect=lambda ip, **k: {"latency_ms": 3.0, "loss_pct": 0.0}), \
+             mock.patch.object(pinger.health, "tcp_ping") as tcp:
+            p.ping_once()
+        snap = p.snapshot()
+        self.assertTrue(snap["lan_blocked"])
+        self.assertEqual(snap["results"]["192.168.1.1"]["method"], "icmp")
+        self.assertEqual({r["method"] for ip, r in snap["results"].items() if ip != "192.168.1.1"}, {"ping"})
+        self.assertTrue(all(r["ms"] is not None for r in snap["results"].values()))
+        tcp.assert_not_called()
+
+    def test_quiet_device_is_not_a_block(self):
+        from netdisco import pinger
+
+        class Scans:
+            def snapshot(self):
+                return {"devices": [{"ip": "192.168.1.9", "online": True, "ports": []}]}
+
+        p = pinger.DevicePinger(Scans())
+        with mock.patch.object(pinger, "icmp_sweep", return_value={}), \
+             mock.patch.object(pinger.health, "icmp_ping", return_value={"latency_ms": None, "loss_pct": 100.0}):
+            p.ping_once()
+        self.assertFalse(p.snapshot()["lan_blocked"])
+        self.assertIsNone(p.snapshot()["results"]["192.168.1.9"]["ms"])
+
+
 class HistoryLog(unittest.TestCase):
     def snap(self, t, inet="green", gw="green", dns="green", ip="192.168.1.12", rssi=-60, wifi_status="green"):
         return {"timestamp": t, "local": {"interface": "en0", "ip": ip}, "identity": {"label": "Wi-Fi “Home”"},

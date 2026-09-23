@@ -41,9 +41,13 @@ def _checksum(data: bytes) -> int:
     return ~s & 0xFFFF
 
 
-def icmp_sweep(ips: list[str], timeout: float = 1.5) -> dict[str, float] | None:
+BLOCKED_ERRNOS = {65, 113, 51, 101, 1, 13}   # host/network unreachable (macOS, Linux), EPERM, EACCES
+
+
+def icmp_sweep(ips: list[str], timeout: float = 1.5, send_errors: dict | None = None) -> dict[str, float] | None:
     """Ping all ips at once over an unprivileged ICMP socket.
-    Returns {ip: rtt_ms} for replies, or None if unprivileged ICMP isn't allowed here."""
+    Returns {ip: rtt_ms} for replies, or None if unprivileged ICMP isn't allowed here.
+    Addresses the OS refused to send to are recorded in send_errors ({ip: errno})."""
     try:
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_ICMP)
     except (PermissionError, OSError):
@@ -58,8 +62,9 @@ def icmp_sweep(ips: list[str], timeout: float = 1.5) -> dict[str, float] | None:
         try:
             sock.sendto(pkt, (ip, 0))
             sent[(ip, seq & 0xFFFF)] = time.perf_counter()
-        except OSError:
-            pass
+        except OSError as e:
+            if send_errors is not None:
+                send_errors[ip] = e.errno
     results: dict[str, float] = {}
     deadline = time.perf_counter() + timeout
     while sent and time.perf_counter() < deadline:
@@ -92,6 +97,7 @@ class DevicePinger:
         self.results: dict[str, dict] = {}     # ip -> {ms, status, method, t, loss_streak}
         self._lock = threading.Lock()
         self._icmp_ok = True
+        self.lan_blocked = False      # macOS Local Network privacy is stopping us reaching LAN devices
         self._stop = threading.Event()
 
     def start(self):
@@ -100,7 +106,7 @@ class DevicePinger:
     def snapshot(self) -> dict:
         with self._lock:
             return {"thresholds": {"green_ms": GREEN_MS, "yellow_ms": YELLOW_MS},
-                    "interval": self.interval, "results": dict(self.results)}
+                    "interval": self.interval, "results": dict(self.results), "lan_blocked": self.lan_blocked}
 
     def clear(self):
         with self._lock:
@@ -117,14 +123,26 @@ class DevicePinger:
             with self._lock:
                 self.results.clear()
             return
-        got = icmp_sweep(ips) if self._icmp_ok else None
-        method = "icmp"
+        send_errors: dict[str, int] = {}
+        got = icmp_sweep(ips, send_errors=send_errors) if self._icmp_ok else None
+        method = {ip: "icmp" for ip in ips}
         if got is None:
             self._icmp_ok = False
-            method = "ping"
+            got = {}
+        # Anything that didn't answer our own socket gets a second opinion from the system ping
+        # binary. On macOS 15+, "Local Network" privacy can block Python from reaching LAN devices
+        # (sends fail with "No route to host") while Apple's own ping is still allowed.
+        unanswered = [ip for ip in ips if ip not in got]
+        if unanswered:
             with ThreadPoolExecutor(16) as ex:
-                res = dict(zip(ips, ex.map(lambda ip: health.icmp_ping(ip, count=1, timeout_s=1), ips)))
-            got = {ip: r["latency_ms"] for ip, r in res.items() if r and r.get("latency_ms") is not None}
+                res = dict(zip(unanswered, ex.map(lambda ip: health.icmp_ping(ip, count=1, timeout_s=1), unanswered)))
+            for ip, r in res.items():
+                if r and r.get("latency_ms") is not None:
+                    got[ip] = r["latency_ms"]
+                    method[ip] = "ping"
+        blocked = [ip for ip, e in send_errors.items() if e in BLOCKED_ERRNOS]
+        rescued = [ip for ip in blocked if method.get(ip) == "ping"]
+        self.lan_blocked = bool(rescued) and len(blocked) >= max(2, len(ips) // 3)
 
         # Devices that ignore ICMP: time a TCP handshake to a port we know is open.
         missing = [d for d in devs if d["ip"] not in got and d.get("ports")]
@@ -144,11 +162,11 @@ class DevicePinger:
             for ip in ips:
                 prev = self.results.get(ip, {})
                 if ip in got:
-                    ms, m = got[ip], method
+                    ms, m = got[ip], method[ip]
                 elif ip in tcp:
                     ms, m = tcp[ip]
                 else:
-                    ms, m = None, method
+                    ms, m = None, method[ip]
                 streak = 0 if ms is not None else prev.get("miss_streak", 0) + 1
                 new[ip] = {"ms": ms, "status": status_for(ms), "method": m, "t": now, "miss_streak": streak}
             self.results = new
