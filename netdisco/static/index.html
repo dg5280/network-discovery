@@ -18,7 +18,9 @@
   </div>
   <nav class="tabs" aria-label="Views">
     <a href="#/" data-view="dashboard">Dashboard</a>
+    <a href="#/networks" data-view="networks">Networks</a>
     <a href="#/survey" data-view="survey">Wi-Fi survey</a>
+    <a href="#/history" data-view="history">History log <span class="badge alert" id="histcount" hidden title="Problems happening now"></span></a>
     <a href="#/sessions" data-view="sessions">Connected <span class="badge" id="sesscount" hidden></span></a>
   </nav>
   <div class="top-actions">
@@ -50,6 +52,19 @@
         <button class="btn primary" id="scan">Scan now</button>
       </div>
     </div>
+
+    <div class="subnet-bar">
+      <div class="subtabs" id="subtabs" role="tablist" aria-label="Subnets"></div>
+      <form class="subnet-add" id="subnet-form" autocomplete="off">
+        <input type="text" id="subnet-input" placeholder="Add subnet — e.g. 10.0.20.0/24" aria-label="Subnet to scan" maxlength="200"
+               title="A subnet (10.0.20.0/24), an address and mask (10.0.20.0 255.255.255.0) or a range (10.0.20.10-60). Separate several with commas.">
+        <input type="text" id="subnet-label" placeholder="Name (optional)" aria-label="Name for this subnet" maxlength="60">
+        <button class="btn" type="submit" id="subnet-go">Add &amp; scan</button>
+      </form>
+    </div>
+    <div class="form-msg error" id="subnet-msg" role="alert" hidden></div>
+    <div class="suggest" id="subnet-suggest" hidden></div>
+    <p class="hint" id="subnet-note"></p>
     <div class="progress" id="progress" hidden><div class="bar" id="bar"></div></div>
 
     <div class="toolbar">
@@ -115,6 +130,58 @@
   </article>
 </main>
 
+<main id="view-networks" class="view" hidden>
+  <div class="section-head">
+    <div>
+      <h2>Networks</h2>
+      <p class="lede">Other subnets and VLANs your router routes to, and the Wi-Fi networks it broadcasts. Sign in to your router with <b>Connect</b> to fill this in.</p>
+    </div>
+    <button class="btn" id="net-refresh">Refresh</button>
+  </div>
+  <div id="networks-body"></div>
+</main>
+
+<main id="view-history" class="view" hidden>
+  <div class="section-head">
+    <div>
+      <h2>History log</h2>
+      <p class="lede">Problems seen while Network Discovery was running — outages, slowdowns, DNS failures and Wi-Fi drops, with how long each lasted.</p>
+    </div>
+    <div class="hist-actions">
+      <div class="seg compact" role="radiogroup" aria-label="Time range" id="hist-range">
+        <label><input type="radio" name="hrange" value="86400" checked> 24 hours</label>
+        <label><input type="radio" name="hrange" value="604800"> 7 days</label>
+        <label><input type="radio" name="hrange" value="2592000"> 30 days</label>
+        <label><input type="radio" name="hrange" value="0"> All</label>
+      </div>
+      <a class="btn" id="hist-export" href="/api/events.csv" download>Export CSV</a>
+      <button class="btn ghost" id="hist-clear">Clear log</button>
+    </div>
+  </div>
+  <div id="hist-now"></div>
+  <div class="stats tiles" id="hist-stats"></div>
+  <article class="panel">
+    <div class="panel-head"><h3>Timeline</h3><span class="dim small" id="hist-span"></span></div>
+    <div id="hist-timeline" class="timeline"></div>
+  </article>
+  <article class="panel">
+    <div class="panel-head">
+      <h3>Events <span class="count" id="hist-count"></span></h3>
+      <div class="toolbar tight">
+        <div class="chips" id="hist-chips" role="group" aria-label="Filter by type"></div>
+        <label class="check small"><input type="checkbox" id="hist-info"> Show info (roaming, network changes)</label>
+      </div>
+    </div>
+    <div class="table-wrap flat">
+      <table class="hist">
+        <thead><tr><th>When</th><th>Lasted</th><th>Type</th><th>What happened</th><th>Worst</th><th>Network</th></tr></thead>
+        <tbody id="hist-body"></tbody>
+      </table>
+      <p class="empty" id="hist-empty" hidden></p>
+    </div>
+  </article>
+</main>
+
 <main id="view-sessions" class="view" hidden>
   <h2>Connected devices</h2>
   <p class="lede">Devices you've signed in to. Sessions close after 15 minutes idle; passwords are never stored.</p>
@@ -155,6 +222,8 @@
 <script src="/dashboard.js"></script>
 <script src="/survey.js"></script>
 <script src="/device.js"></script>
+<script src="/networks.js"></script>
+<script src="/history.js"></script>
 <script src="/app.js"></script>
 </body>
 </html>

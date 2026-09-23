@@ -168,6 +168,7 @@ class HealthMonitor:
     def __init__(self, interval: float = 5.0):
         self.interval = interval
         self.on_network_change = None   # callback(old_identity, new_identity)
+        self.on_snapshot = None          # callback(snapshot) after every check (history log)
         self.wifi_live = None            # optional WifiLive for fresh signal readings
         self.identity: dict | None = None
         self.latest: dict = {}
@@ -234,6 +235,11 @@ class HealthMonitor:
             self.history["internet"].append({"t": now, "ms": inet["latency_ms"], "loss": inet["loss_pct"]})
             self.history["gateway"].append({"t": now, "ms": gw_r["latency_ms"], "loss": gw_r["loss_pct"]})
             self.latest = snap
+        if self.on_snapshot:
+            try:
+                self.on_snapshot(snap)
+            except Exception as e:
+                print(f"[health] snapshot handler failed: {e}")
         return snap
 
     def snapshot(self) -> dict:

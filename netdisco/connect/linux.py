@@ -68,6 +68,17 @@ SECTIONS = [
     ("leases", "for f in /tmp/dhcp.leases /var/lib/misc/dnsmasq.leases /etc/dhcpd/dhcpd.leases "
                "/tmp/dhcpd.leases /var/lib/dhcp/dhcpd.leases; do [ -r $f ] && { echo \"## $f\"; tail -n 300 $f; }; done"),
     ("arp", "cat /proc/net/arp 2>/dev/null"),
+    ("routes", "ip -4 route show table all 2>/dev/null || ip -4 route show 2>/dev/null || route -n 2>/dev/null "
+               "|| cat /proc/net/route"),
+    # Wi-Fi networks this device broadcasts. Only whitelisted keys are read — never passwords/keys.
+    ("wifi_conf", "command -v uci >/dev/null && uci -q show wireless 2>/dev/null | grep -E "
+                  "'^wireless\\.[^.=]+=|\\.(ssid|encryption|hidden|disabled|network|device|mode|band|hwmode|channel|htmode|"
+                  "isolate|wps_pushbutton|ieee80211w|ifname)='; echo '@@HOSTAPD@@'; "
+                  "for f in /var/run/hostapd*.conf /var/run/hostapd/*.conf /tmp/run/hostapd*.conf /tmp/hostapd*.conf "
+                  "/tmp/*/hostapd*.conf /etc/hostapd/*.conf /etc/hostapd.conf /var/packages/*/target/etc/hostapd*.conf; do "
+                  "[ -r \"$f\" ] && { echo \"## $f\"; grep -E '^(interface|bss|ssid|ssid2|hw_mode|channel|op_class|"
+                  "ignore_broadcast_ssid|wpa|wpa_key_mgmt|ieee80211w|wps_state|bridge|ap_isolate|disabled|ieee80211ac|ieee80211ax)=' "
+                  "\"$f\"; }; done 2>/dev/null"),
     ("netdev2", "sleep 2; cat /proc/uptime; cat /proc/net/dev"),
 ]
 
@@ -714,10 +725,16 @@ def analyze(sections: dict) -> dict:
         findings.append(finding("info", "wireless", f"{len(fair)} Wi-Fi client(s) with fair signal",
                                 ", ".join((c.get("name") or c["mac"]) for c in fair[:6]), "Fine for browsing; may struggle with video calls."))
 
+    from .. import netinfo
+    networks = netinfo.networks_from_ssh(sections)
+    ssids = netinfo.ssids_from_ssh(sections, wireless.get("radios"))
+    findings += netinfo.ssid_findings(ssids)
+
     if not any(f["severity"] in ("critical", "warning") for f in findings):
         findings.append(finding("ok", "summary", "No problems found", "Everything checked is within normal ranges."))
     findings = sort_findings(findings)
     return {
+        "networks": networks, "ssids": ssids, "neighbors": netinfo.neighbors_from_ssh(sections),
         "kind": "ssh", "collected_at": time.time(), "device": ident, "status": overall(findings),
         "findings": findings,
         "system": {"uptime_s": uptime, "uptime": human_duration(uptime), "load": load, "cpus": cpus, "memory": mem,

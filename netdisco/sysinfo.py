@@ -91,6 +91,86 @@ def interface_network(iface: str | None) -> tuple[str | None, ipaddress.IPv4Netw
     return ip, net
 
 
+def all_interfaces() -> list[dict]:
+    """Every IPv4 address on this computer: [{iface, ip, network}] (loopback excluded)."""
+    rows: list[dict] = []
+    if IS_MAC:
+        cur = None
+        for line in run(["ifconfig"]).splitlines():
+            m = re.match(r"^(\S+?):\s", line)
+            if m:
+                cur = m.group(1)
+                continue
+            m = re.search(r"inet (\d+\.\d+\.\d+\.\d+) netmask (0x[0-9a-fA-F]+)", line)
+            if m and cur:
+                prefix = bin(int(m.group(2), 16)).count("1")
+                rows.append({"iface": cur, "ip": m.group(1),
+                             "network": ipaddress.IPv4Network(f"{m.group(1)}/{prefix}", strict=False)})
+    if not rows:
+        for line in run(["ip", "-o", "-4", "addr", "show"]).splitlines():
+            m = re.search(r"^\d+:\s+(\S+)\s+inet (\d+\.\d+\.\d+\.\d+)/(\d+)", line)
+            if m:
+                rows.append({"iface": m.group(1).split("@")[0], "ip": m.group(2),
+                             "network": ipaddress.IPv4Network(f"{m.group(2)}/{m.group(3)}", strict=False)})
+    return [r for r in rows if not r["network"].is_loopback]
+
+
+def local_routes() -> list[dict]:
+    """IPv4 routes this computer knows (VPNs often add some). Default and host routes excluded."""
+    routes: list[dict] = []
+    if IS_MAC:
+        for line in run(["netstat", "-rn", "-f", "inet"]).splitlines():
+            p = line.split()
+            if len(p) < 4 or p[0] in ("default", "Destination", "Internet:") or "!" in p[2]:
+                continue
+            dest, gw, flags, iface = p[0], p[1], p[2], p[3]
+            if "H" in flags or "W" in flags:        # host routes / cloned ARP entries
+                continue
+            net = mac_netstat_dest(dest)
+            if net is None:
+                continue
+            routes.append({"network": str(net), "via": gw if re.match(r"\d+\.\d+\.\d+\.\d+$", gw) else None,
+                           "iface": iface, "type": "static" if "G" in flags else "connected"})
+    else:
+        for line in run(["ip", "-4", "route", "show"]).splitlines():
+            m = re.match(r"^(\d+\.\d+\.\d+\.\d+(?:/\d+)?)\s*(.*)$", line)
+            if not m:
+                continue
+            via = re.search(r"\bvia (\S+)", m.group(2))
+            dev = re.search(r"\bdev (\S+)", m.group(2))
+            try:
+                net = ipaddress.IPv4Network(m.group(1), strict=False)
+            except ValueError:
+                continue
+            routes.append({"network": str(net), "via": via.group(1) if via else None,
+                           "iface": dev.group(1) if dev else None, "type": "static" if via else "connected"})
+    return routes
+
+
+def mac_netstat_dest(dest: str) -> ipaddress.IPv4Network | None:
+    """macOS netstat abbreviates networks: '10.8/16', '192.168.1', '172.16.4/22', '127'."""
+    base, _, plen = dest.partition("/")
+    octets = base.split(".")
+    if not all(o.isdigit() for o in octets) or not 1 <= len(octets) <= 4:
+        return None
+    prefix = int(plen) if plen.isdigit() else len(octets) * 8
+    try:
+        net = ipaddress.IPv4Network(".".join(octets + ["0"] * (4 - len(octets))) + f"/{prefix}", strict=False)
+    except ValueError:
+        return None
+    if net.prefixlen == 32 or net.is_loopback or net.is_multicast or net.prefixlen == 0:
+        return None
+    return net
+
+
+def data_dir() -> str:
+    """~/.netdisco (override with NETDISCO_HOME) — created on first use."""
+    import os
+    d = os.environ.get("NETDISCO_HOME") or os.path.join(os.path.expanduser("~"), ".netdisco")
+    os.makedirs(d, mode=0o700, exist_ok=True)
+    return d
+
+
 def interface_mac(iface: str | None) -> str | None:
     if not iface:
         return None

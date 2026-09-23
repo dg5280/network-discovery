@@ -116,8 +116,163 @@ class DemoScanner:
         threading.Thread(target=run, daemon=True).start()
         return True
 
+    id, label, source, spec, created = "local", None, "local", None, 0.0
+
     def snapshot(self):
         return {"state": dict(self.state), "devices": list(self.devices)}
+
+    def reset(self, label=None):
+        pass
+
+    def summary(self):
+        return {"id": "local", "label": None, "source": "local", "spec": self.state["network"], "local": True,
+                "state": dict(self.state), "devices": len(self.devices),
+                "online": sum(1 for d in self.devices if d.get("online"))}
+
+
+# Devices for the demo's other subnets (VLANs behind the router).
+SUBNET_RAW = {
+    "10.0.20": [dict(host=1, vendor="Synology", ports=[53, 80, 443], hostname="router-iot.lan"),
+                dict(host=11, mac="24:0a:c4:11:22:33", vendor="Espressif", ports=[80], hostname="esp-thermostat.lan"),
+                dict(host=12, mac="d8:f1:5b:44:55:66", vendor="Espressif", ports=[80, 6668], hostname="smartplug-kitchen.lan"),
+                dict(host=15, mac="18:b4:30:77:88:99", vendor="Nest Labs", ports=[], hostname="nest-thermostat.lan"),
+                dict(host=21, mac="00:17:88:aa:bb:cc", vendor="Signify (Philips Hue)", ports=[80, 443], hostname="hue-bridge.lan"),
+                dict(host=30, mac="44:65:0d:10:20:30", vendor="Amazon Technologies", ports=[], hostname="echo-dot.lan"),
+                dict(host=31, mac="f0:81:73:40:50:60", vendor="Amazon Technologies", ports=[], hostname=None)],
+    "10.0.40": [dict(host=1, vendor="Synology", ports=[53, 80, 443]),
+                dict(host=21, mac="c0:56:e3:21:21:21", vendor="Hikvision", ports=[80, 554, 8000], hostname="garage-cam.lan"),
+                dict(host=22, mac="c0:56:e3:22:22:22", vendor="Hikvision", ports=[80, 554, 8000], hostname="backyard-cam.lan"),
+                dict(host=50, mac="00:11:32:40:40:50", vendor="Synology", ports=[22, 443, 5000, 5001], hostname="nvr.lan")],
+}
+
+
+class DemoSubnetScanner:
+    """Stand-in Scanner for added subnets in --demo."""
+
+    def __init__(self, spec, label=None, source="manual", tab_id=None, gate=None, mac_hints=None):
+        from .discovery import parse_spec
+        self.spec = parse_spec(spec)
+        self.id, self.label, self.source, self.created = tab_id, label, source, time.time()
+        self.devices = []
+        self.state = {"running": False, "phase": "idle", "progress": 0, "started": None, "finished": None,
+                      "error": None, "network": self.spec["spec"], "targets": self.spec["count"], "mode": "routed",
+                      "note": "Routed subnet — found by ping and port checks. MAC addresses come from your router "
+                              "when you're connected to it."}
+
+    def start(self):
+        if self.state["running"]:
+            return False
+        self.state.update(running=True, phase="Pinging every address", progress=5, started=time.time())
+
+        def run():
+            for pct, ph in [(25, "Pinging again (slow responders)"), (40, "Looking for devices that ignore ping"),
+                            (65, "Checking common ports"), (85, "Looking up names")]:
+                time.sleep(0.7)
+                self.state.update(phase=ph, progress=pct)
+            prefix = ".".join(self.spec["spec"].split(".")[:3])
+            rows = SUBNET_RAW.get(prefix) or [dict(host=1, ports=[80, 443]), dict(host=7, ports=[22]),
+                                             dict(host=40, ports=[445, 139, 3389], vendor=None)]
+            now = time.time()
+            devs = []
+            for r in rows:
+                d = dict(randomized=False, vendor=None, hostname=None, is_gateway=False, is_self=False,
+                         mdns=None, ssdp=None, netbios=None, mac=None)
+                d.update({k: v for k, v in r.items() if k != "host"}, ip=f"{prefix}.{r['host']}")
+                if r["host"] == 1:
+                    d.update(mac="90:09:d0:11:22:33", is_gateway=True)
+                d.update(classify.classify(d))
+                from .discovery import _display_name
+                d["name"] = _display_name(d)
+                d.update(first_seen=now - 3600, last_seen=now, online=True)
+                devs.append(d)
+            self.devices = devs
+            self.state.update(running=False, phase="done", progress=100, finished=time.time())
+
+        threading.Thread(target=run, daemon=True).start()
+        return True
+
+    def reset(self, label=None):
+        pass
+
+    def snapshot(self):
+        return {"state": dict(self.state), "devices": list(self.devices)}
+
+    def summary(self):
+        return {"id": self.id, "label": self.label, "source": self.source, "spec": self.spec["spec"], "local": False,
+                "state": dict(self.state), "devices": len(self.devices),
+                "online": sum(1 for d in self.devices if d.get("online"))}
+
+
+def DemoScans():
+    from .discovery import ScanManager
+    m = ScanManager(local=DemoScanner(), persist=False, scanner_cls=DemoSubnetScanner)
+    m.add("10.0.20.0/24", "IoT · VLAN 20", source="router", scan=False)
+    return m
+
+
+def demo_local_routes():
+    from .netinfo import build_networks
+    return build_networks([{"network": "10.8.0.0/24", "via": "10.8.0.1", "iface": "utun4"},
+                           {"network": "192.168.1.0/24", "iface": "en0"}], source="this computer")
+
+
+class DemoEvents:
+    """A week of made-up history so the History log tab has something to show."""
+
+    def __init__(self):
+        from .events import EventLog
+        self.log = EventLog(persist=False)
+        now = time.time()
+        H = 3600
+        net = "Wi-Fi “HomeNet”"
+        seed = [
+            (-6 * 24 * H - 2 * H, 42 * 60, "internet", "critical", "Internet outage",
+             "The router answered but the internet didn't — the problem was upstream (modem, ISP or the router's WAN).", {"max_loss": 100.0}),
+            (-5 * 24 * H + 3 * H, 12 * 60, "internet", "warning", "Internet slow or losing packets",
+             "Latency to the internet was over 50 ms or packets were lost; the router itself was fine, so the slowdown was upstream.", {"worst_ms": 412.0, "max_loss": 33.3}),
+            (-4 * 24 * H - 5 * H, 95, "wifi", "critical", "Wi-Fi disconnected", "This computer lost its Wi-Fi connection. Reconnected to “HomeNet”.", {}),
+            (-3 * 24 * H + 1 * H, 6 * 60, "dns", "critical", "DNS failing — websites won't load by name",
+             "DNS servers: 192.168.1.88. The internet itself was reachable, so try other DNS servers (e.g. 1.1.1.1).", {}),
+            (-2 * 24 * H - 7 * H, 25 * 60, "wifi", "warning", "Weak Wi-Fi signal",
+             "Signal dropped below -75 dBm on “HomeNet” — expect slow speeds and drop-outs.", {"min_rssi": -81}),
+            (-1 * 24 * H - 3 * H, 3 * 60, "gateway", "critical", "Router not responding",
+             "No reply from the router at 192.168.1.1. Devices here couldn't reach anything beyond it.", {"max_loss": 100.0}),
+            (-20 * H, 18 * 60, "internet", "critical", "Internet outage",
+             "The router answered but the internet didn't — the problem was upstream (modem, ISP or the router's WAN).", {"max_loss": 100.0}),
+            (-9 * H, 4 * 60, "gateway", "warning", "Router slow or dropping packets",
+             "Round-trip time to the router (192.168.1.1) was high or packets were lost — usually Wi-Fi interference, weak signal or a busy router.", {"worst_ms": 187.0, "max_loss": 20.0}),
+            (-3 * H, 40, "wifi", "critical", "Wi-Fi disconnected", "This computer lost its Wi-Fi connection. Reconnected to “HomeNet”.", {}),
+        ]
+        for off, dur, kind, sev, title, detail, metrics in seed:
+            e = self.log._open(kind, sev, title, detail, now + off, net, metrics)
+            self.log._close(e, now + off + dur)
+        self.log.add("wifi", "info", "Roamed to another access point", "a0:36:bc:11:22:33 → a0:36:bc:44:55:66 (channel 36)",
+                     t=now - 2 * H, network=net)
+        self.log.add("network", "info", "Joined Wi-Fi “HomeNet”", "Previously on Wi-Fi “Office-5G”.", t=now - 26 * H, network=net)
+        self.log.add("app", "info", "Monitoring started", "Network Discovery began checking the network.", t=now - 7 * 24 * H)
+        # One problem still going on right now.
+        self.live = self.log._open("internet", "warning", "Internet slow or losing packets",
+                                   "Latency to the internet was over 50 ms or packets were lost; the router itself was fine, so the slowdown was upstream.",
+                                   now - 140, net, {"worst_ms": 238.0, "max_loss": 10.0})
+
+    def add(self, *a, **k):
+        return self.log.add(*a, **k)
+
+    def observe(self, snap):
+        pass
+
+    def observe_wifi(self, w):
+        pass
+
+    def network_changed(self, old, new):
+        pass
+
+    def query(self, since=0.0, kinds=None, limit=1000):
+        self.live["last_seen"] = time.time()
+        return self.log.query(since, kinds, limit)
+
+    def clear(self):
+        self.log.clear()
 
 
 # ---------------------------------------------------------------------------- v0.2 demo pieces
@@ -139,6 +294,9 @@ class DemoPinger:
         base = {"192.168.1.1": 2, "192.168.1.20": 48, "192.168.1.21": None, "192.168.1.25": 4, "192.168.1.31": 7,
                 "192.168.1.32": 140, "192.168.1.40": 1, "192.168.1.45": 3, "192.168.1.50": 12, "192.168.1.51": 9,
                 "192.168.1.60": 35, "192.168.1.61": 22, "192.168.1.88": 1, "192.168.1.99": 5}
+        for d in self.scanner.all_devices() if hasattr(self.scanner, "all_devices") else []:
+            if d["ip"] not in base and not d.get("is_self"):
+                base[d["ip"]] = 4 + (sum(map(int, d["ip"].split("."))) % 9)      # routed: a hop further away
         res = {}
         for ip, ms in base.items():
             v = None if ms is None else round(ms * (0.8 + random.random() * 0.4), 1)
@@ -253,6 +411,10 @@ ROUTER_API = {
         "SYNO.Core.Upgrade.Server": {"path": "entry.cgi", "minVersion": 1, "maxVersion": 1},
         "SYNO.Core.Network.NSM.Device": {"path": "entry.cgi", "minVersion": 1, "maxVersion": 1},
         "SYNO.Mesh.Node.List": {"path": "entry.cgi", "minVersion": 1, "maxVersion": 1},
+        "SYNO.Core.Network.Router.LocalLan": {"path": "entry.cgi", "minVersion": 1, "maxVersion": 1},
+        "SYNO.Core.Network.Router.Static.Route": {"path": "entry.cgi", "minVersion": 1, "maxVersion": 1},
+        "SYNO.Wifi.Network.Setting": {"path": "entry.cgi", "minVersion": 1, "maxVersion": 1},
+        "SYNO.Wifi.Network.Guest": {"path": "entry.cgi", "minVersion": 1, "maxVersion": 1},
         "SYNO.Core.Network.Ethernet": {"path": "entry.cgi", "minVersion": 1, "maxVersion": 1}}},
     "SYNO.Core.Network.Ethernet": [{"ifname": "wan", "status": "connected", "speed": 2500, "duplex": True, "ip": "203.0.113.24"},
                                    {"ifname": "lan1", "status": "connected", "speed": 1000, "duplex": True},
@@ -266,6 +428,23 @@ ROUTER_API = {
     "SYNO.Core.Upgrade.Server": {"update": {"available": True, "version": "SRM 1.3.1-9346 Update 9"}},
     "SYNO.Mesh.Node.List": {"nodes": [{"node_id": 0, "name": "RT6600ax (Primary)", "status": "online", "ip": "192.168.1.1"},
                                       {"node_id": 1, "name": "WRX560 Back office", "status": "online", "ip": "192.168.1.2"}]},
+    "SYNO.Core.Network.Router.LocalLan": {"lans": [
+        {"name": "Primary network", "ifname": "lan", "ip": "192.168.1.1", "netmask": "255.255.255.0", "vlan_id": 0},
+        {"name": "IoT", "ifname": "lan.20", "ip": "10.0.20.1", "netmask": "255.255.255.0", "vlan_id": 20},
+        {"name": "Cameras", "ifname": "lan.40", "ip": "10.0.40.1", "netmask": "255.255.255.0", "vlan_id": 40},
+        {"name": "Guest", "ifname": "guest", "ip": "10.0.30.1", "netmask": "255.255.255.0", "vlan_id": 30}]},
+    "SYNO.Core.Network.Router.Static.Route": {"routes": [
+        {"dest": "192.168.50.0", "netmask": "255.255.255.0", "gateway": "192.168.1.254", "interface": "lan",
+         "desc": "Lab switch"}]},
+    "SYNO.Wifi.Network.Setting": {"profiles": [
+        {"radio": "2.4G", "ssid": "HomeNet", "security": "wpa2_wpa3_psk", "password": "correct-horse-battery",
+         "hide_ssid": False, "enable": True, "channel": 6},
+        {"radio": "5G", "ssid": "HomeNet", "security": "wpa2_wpa3_psk", "password": "correct-horse-battery",
+         "hide_ssid": False, "enable": True, "channel": 149},
+        {"radio": "2.4G", "ssid": "HomeNet-IoT", "security": "wpa_wpa2_psk", "wpa_key": "iot-secret",
+         "hide_ssid": True, "enable": True, "vlan_id": 20, "wps_enable": True}]},
+    "SYNO.Wifi.Network.Guest": {"guest": [
+        {"ssid": "HomeNet-Guest", "radio": "5G", "security": "open", "enable": True, "isolation": False, "vlan_id": 30}]},
     "SYNO.Core.Network.NSM.Device": {"devices": [
         {"mac": "da:a1:19:4c:5d:6e", "hostname": "Alexs-iPhone", "ip_addr": "192.168.1.20", "is_online": True,
          "is_wireless": True, "band": "5G", "signalstrength": 82, "current_rate": 1201, "max_rate": 1201,

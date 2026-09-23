@@ -5,7 +5,10 @@ const Dash = {
   view: { filter: "all", q: "", sort: "ip", dir: 1, open: new Set() },
   devices: [], categories: {}, pings: {}, pingTh: { green_ms: 30, yellow_ms: 100 },
   scanWasRunning: false, networkLabel: null, health: null,
+  tab: "local", tabs: [], suggestions: [], devReq: 0,
 };
+const curTab = () => Dash.tabs.find((t) => t.id === Dash.tab) || { id: "local", local: true, state: {} };
+const tabName = (t) => (t.local ? "This network" : t.label || t.spec);
 const CONF = { high: 3, medium: 2, low: 1, none: 0 };
 
 // ------------------------------------------------------------------ health
@@ -66,8 +69,13 @@ function renderHealth(h) {
   const L = h.local;
   $("netline").textContent = [L.hostname, L.ip, L.network && `network ${L.network}`, L.interface && `via ${L.interface}`].filter(Boolean).join("  ·  ");
   $("updated").textContent = "Updated " + fmtTime(h.timestamp);
-  const label = (h.identity && h.identity.label) || null;
-  $("netname").textContent = label || "your network";
+  Dash.networkLabel = (h.identity && h.identity.label) || null;
+  renderNetName();
+}
+
+function renderNetName() {
+  const t = curTab();
+  $("netname").textContent = t.local ? Dash.networkLabel || "your network" : `${t.label ? t.label + " — " : ""}${t.spec}`;
 }
 
 // ------------------------------------------------------------------ devices
@@ -170,11 +178,21 @@ function renderScan(st) {
   $("scan").textContent = running ? "Scanning…" : "Scan now";
   $("progress").hidden = !running;
   $("bar").style.width = (st.progress || 0) + "%";
-  if (running) $("scanstate").textContent = `${st.phase}…`;
+  if (running) $("scanstate").textContent = st.phase === "waiting" ? "Queued — waiting for another scan to finish…" : `${st.phase}…`;
   else if (st.error) $("scanstate").textContent = `Scan failed: ${st.error}`;
-  else if (st.finished) $("scanstate").textContent = `Last scan ${fmtTime(st.finished, false)} · ${st.targets} addresses on ${st.network}`;
-  if (running && !Dash.devices.length) $("devbody").innerHTML = `<tr><td colspan="9" class="empty">Scanning your network… this takes about 15 seconds.</td></tr>`;
-  // Network changed → the list was cleared. Tell the user once.
+  else if (st.finished) $("scanstate").textContent = `Last scan ${fmtTime(st.finished, false)} · ${num(st.targets)} addresses on ${st.network}`;
+  else $("scanstate").textContent = "";
+  if (running && !Dash.devices.length) {
+    const t = curTab();
+    $("devbody").innerHTML = `<tr><td colspan="9" class="empty">${t.local ? "Scanning your network… this takes about 15 seconds."
+      : `Scanning ${esc(t.spec)}… checking ${num(st.targets || 0)} addresses — this takes about ${st.targets > 1024 ? "a few minutes" : "30–60 seconds"}.`}</td></tr>`;
+  }
+  const t = curTab();
+  $("subnet-note").textContent = t.local ? "" : st.note || "";
+}
+
+/* Network changed → the local list was cleared. Tell the user once. */
+function checkNetworkChange(st) {
   if (st.network_changed_at && st.network_changed_at !== Dash.changedAt) {
     if (Dash.changedAt !== undefined) showBanner(`Switched to ${esc(st.network_label || "a new network")} — cleared devices from the previous network and started a new scan.`);
     Dash.changedAt = st.network_changed_at;
@@ -189,9 +207,12 @@ function showBanner(html, ms = 12000) {
 async function pollHealth() {
   try { renderHealth(await api("/api/health")); } catch (e) { $("netline").textContent = "Lost contact with the local agent — is it still running?"; }
 }
-async function pollDevices() {
+async function pollDevices(once) {
+  const req = ++Dash.devReq, tab = Dash.tab;
   try {
-    const r = await api("/api/devices");
+    const r = await api(`/api/devices?tab=${encodeURIComponent(tab)}`);
+    if (req !== Dash.devReq || tab !== Dash.tab) return;       // tab switched while we waited
+    if (r.error) { selectTab("local"); return; }
     renderScan(r.state);
     const cleared = !r.devices.length && Dash.devices.length;
     if (!r.state.running || Dash.scanWasRunning !== r.state.running || !Dash.devices.length || cleared) {
@@ -199,8 +220,72 @@ async function pollDevices() {
       if (App.current === "dashboard") renderDevices();
     }
     Dash.scanWasRunning = r.state.running;
-    setTimeout(pollDevices, r.state.running ? 1000 : 4000);
-  } catch (e) { setTimeout(pollDevices, 5000); }
+    clearTimeout(Dash.devTimer);
+    Dash.devTimer = setTimeout(pollDevices, r.state.running ? 1000 : 4000);
+  } catch (e) { if (req === Dash.devReq) { clearTimeout(Dash.devTimer); Dash.devTimer = setTimeout(pollDevices, 5000); } }
+}
+
+// ------------------------------------------------------------------ subnet tabs
+function selectTab(id) {
+  if (id === Dash.tab && Dash.devices.length) return;
+  Dash.tab = id; Dash.devices = []; Dash.scanWasRunning = false;
+  Dash.view.open.clear(); Dash.view.filter = "all"; $("subnet-msg").hidden = true;
+  localStore.set("nd-tab", id);
+  renderSubtabs(); renderNetName(); renderDevices();
+  $("devbody").innerHTML = `<tr><td colspan="9" class="empty">Loading…</td></tr>`;
+  pollDevices();
+}
+
+function renderSubtabs() {
+  const tabs = Dash.tabs.length ? Dash.tabs : [{ id: "local", local: true, state: {}, online: 0, devices: 0 }];
+  $("subtabs").innerHTML = tabs.map((t) => {
+    const st = t.state || {}, sel = t.id === Dash.tab;
+    const n = st.running ? `<span class="spinner" title="Scanning"></span>` : `<b>${t.online}</b>`;
+    const sub = t.local ? esc(t.spec || "") : t.label ? esc(t.spec) : st.mode === "routed" ? "routed" : "";
+    return `<div class="subtab${sel ? " sel" : ""}" role="presentation">
+      <button role="tab" aria-selected="${sel}" data-tab="${esc(t.id)}" title="${esc(t.spec || "")}${st.error ? " — " + esc(st.error) : ""}">
+        ${t.local ? svg(I.wifi) : svg(I.network)}<span class="st-name">${esc(tabName(t))}</span>${sub ? `<span class="st-sub mono">${sub}</span>` : ""}${n}${st.error ? `<span class="st-err" aria-label="scan failed">!</span>` : ""}
+      </button>${t.local ? "" : `<button class="st-x" data-remove="${esc(t.id)}" title="Remove this tab" aria-label="Remove ${esc(tabName(t))}">×</button>`}</div>`;
+  }).join("");
+}
+
+function renderSuggestions() {
+  const sg = Dash.suggestions || [], el = $("subnet-suggest");
+  el.hidden = !sg.length;
+  if (!sg.length) return;
+  const src = sg.every((x) => x.source === "this computer") ? "This computer has routes to" : "Your router knows about";
+  el.innerHTML = `<span class="sg-lead">${svg(I.router)} ${src} ${sg.length} more network${sg.length > 1 ? "s" : ""}:</span>
+    ${sg.slice(0, 8).map((x) => `<button class="chip sg" data-add="${esc(x.network)}" data-label="${esc(x.label || "")}" data-source="${esc(x.source === "this computer" ? "this computer" : "router")}"
+      title="${esc(x.type)} · ${num(x.hosts)} addresses · from ${esc(x.source)}"><span class="mono">${esc(x.network)}</span>${x.label && x.label !== x.network ? ` <span class="dim">${esc(x.label)}</span>` : ""} <b>+ Scan</b></button>`).join("")}
+    ${sg.length > 1 ? `<button class="btn small" data-add-all>Scan all ${sg.length}</button>` : ""}
+    <a class="link small" href="#/networks">Details</a>`;
+}
+
+async function pollSubnets() {
+  try {
+    const r = await api("/api/subnets");
+    Dash.tabs = r.tabs || []; Dash.suggestions = r.suggestions || [];
+    const local = Dash.tabs.find((t) => t.local);
+    if (local) checkNetworkChange(local.state || {});
+    if (!Dash.tabs.some((t) => t.id === Dash.tab)) selectTab("local");
+    if (App.current === "dashboard") { renderSubtabs(); renderSuggestions(); renderNetName(); }
+  } catch (e) {}
+  clearTimeout(Dash.subTimer);
+  Dash.subTimer = setTimeout(pollSubnets, Dash.tabs.some((t) => t.state && t.state.running) ? 1500 : 5000);
+}
+
+async function addSubnets(spec, label, source) {
+  const msg = $("subnet-msg");
+  msg.hidden = true;
+  const r = await api("/api/subnets", { spec, label, source }).catch(() => ({ ok: false, message: "Lost contact with the local agent." }));
+  if (r.errors && r.errors.length || !r.ok) { msg.textContent = r.message || (r.errors || []).join(" "); msg.hidden = false; }
+  await pollSubnets();
+  if (r.added && r.added.length) {
+    const first = r.added[0];
+    if (first.note) showBanner(esc(first.note), 6000);
+    selectTab(first.id);
+  }
+  return r;
 }
 async function pollPings() {
   try {
@@ -214,7 +299,42 @@ async function pollPings() {
 function initDashboard() {
   $("scan").addEventListener("click", async () => {
     $("scan").disabled = true;
-    try { await api("/api/scan", {}); } catch (e) {}
+    try { await api("/api/scan", { tab: Dash.tab }); } catch (e) {}
+    pollDevices(); pollSubnets();
+  });
+  $("subtabs").addEventListener("click", async (e) => {
+    const x = e.target.closest("[data-remove]");
+    if (x) {
+      const t = Dash.tabs.find((y) => y.id === x.dataset.remove);
+      if (!confirmInline(x, `Remove ${tabName(t || { spec: x.dataset.remove })}?`)) return;
+      await api(`/api/subnets/${encodeURIComponent(x.dataset.remove)}/remove`, {}).catch(() => {});
+      if (Dash.tab === x.dataset.remove) selectTab("local");
+      pollSubnets(); return;
+    }
+    const b = e.target.closest("[data-tab]"); if (b) selectTab(b.dataset.tab);
+  });
+  $("subtabs").addEventListener("keydown", (e) => {
+    if (!["ArrowLeft", "ArrowRight"].includes(e.key)) return;
+    const ids = Dash.tabs.map((t) => t.id), i = ids.indexOf(Dash.tab);
+    const next = ids[(i + (e.key === "ArrowRight" ? 1 : ids.length - 1)) % ids.length];
+    if (next) { selectTab(next); requestAnimationFrame(() => { const b = document.querySelector(`#subtabs [data-tab="${CSS.escape(next)}"]`); if (b) b.focus(); }); }
+  });
+  $("subnet-form").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const v = $("subnet-input").value.trim(); if (!v) { $("subnet-input").focus(); return; }
+    $("subnet-go").disabled = true;
+    const r = await addSubnets(v, $("subnet-label").value.trim(), "manual");
+    $("subnet-go").disabled = false;
+    if (r.ok && !(r.errors || []).length) { $("subnet-input").value = ""; $("subnet-label").value = ""; }
+  });
+  $("subnet-suggest").addEventListener("click", async (e) => {
+    const b = e.target.closest("[data-add]");
+    if (b) { b.disabled = true; await addSubnets(b.dataset.add, b.dataset.label, b.dataset.source); return; }
+    if (e.target.closest("[data-add-all]")) {
+      const sg = Dash.suggestions.slice();
+      for (const x of sg) await api("/api/subnets", { spec: x.network, label: x.label, source: x.source === "this computer" ? "this computer" : "router" }).catch(() => {});
+      pollSubnets();
+    }
   });
   $("search").addEventListener("input", (e) => { Dash.view.q = e.target.value; renderDevices(); });
   $("chips").addEventListener("click", (e) => { const b = e.target.closest(".chip"); if (b) { Dash.view.filter = b.dataset.f; renderDevices(); } });
@@ -233,4 +353,13 @@ function initDashboard() {
     const tr = e.target.closest("tr.row"); if (!tr) return;
     const k = tr.dataset.key; Dash.view.open.has(k) ? Dash.view.open.delete(k) : Dash.view.open.add(k); renderDevices();
   });
+}
+
+/* Two-click confirm without a browser dialog: first click arms the button for 3 s. */
+function confirmInline(btn, title, text = "Remove?") {
+  if (btn.dataset.armed === "1") return true;
+  btn.dataset.armed = "1"; const old = btn.textContent, oldT = btn.title;
+  btn.textContent = text; btn.title = title; btn.classList.add("armed");
+  setTimeout(() => { btn.dataset.armed = ""; btn.textContent = old; btn.title = oldT; btn.classList.remove("armed"); }, 3000);
+  return false;
 }

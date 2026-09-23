@@ -15,6 +15,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
+from .. import netinfo
 from .errors import ConnectError
 from .findings import finding, human_bytes, human_duration, overall, signal_status, sort_findings
 
@@ -71,7 +72,7 @@ class SRMSession:
     # ------------------------------------------------------------------ http
     def _get(self, path: str, params: dict, timeout: float = 20.0) -> dict:
         url = self.base + path + "?" + urllib.parse.urlencode(params)
-        req = urllib.request.Request(url, headers={"User-Agent": "netdisco/0.2.3"})
+        req = urllib.request.Request(url, headers={"User-Agent": "netdisco/0.3"})
         try:
             with urllib.request.urlopen(req, timeout=timeout, context=self._ctx if self.https else None) as r:
                 return json.loads(r.read(5_000_000).decode("utf-8", "replace"))
@@ -99,7 +100,7 @@ class SRMSession:
         """Form POST (how the SRM web page signs in) — keeps the password out of the URL."""
         data = urllib.parse.urlencode(params).encode()
         req = urllib.request.Request(self.base + path, data=data, headers={
-            "User-Agent": "netdisco/0.2.3", "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8"})
+            "User-Agent": "netdisco/0.3", "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8"})
         try:
             with urllib.request.urlopen(req, timeout=timeout, context=self._ctx if self.https else None) as r:
                 return json.loads(r.read(1_000_000).decode("utf-8", "replace"))
@@ -458,7 +459,8 @@ class SRMSession:
             "interfaces_note": "Error and drop counters aren't available through the Synology web API — connect with SSH for full counters.",
             "logs": {"sources": ["DSM log"] if log_lines else [], "entries": log_lines[:100]},
             "updates": {"manager": "DSM", "available": sysd["update_available"]},
-            "raw": {k: json.dumps(v, indent=1)[:20000] for k, v in raw.items()},
+            "raw": {k: json.dumps(netinfo.redact(v), indent=1)[:20000]
+                    for k, v in raw.items()},
             "connection": {"method": "Synology DSM web API", "host": self.host, "port": self.port, "user": self.username,
                            "https": self.https},
         }
@@ -525,6 +527,19 @@ class SRMSession:
             findings.append(finding("info", "wireless", f"{len(slow)} client(s) connected at a very low rate",
                                     ", ".join(f"{c['name'] or c['mac']} ({c['tx_rate_mbps']:.0f} Mb/s)" for c in slow[:6]),
                                     "Low link rates slow the whole radio for everyone — often old 2.4 GHz devices at range."))
+        # Networks (LANs / VLANs / static routes) and the Wi-Fi networks the router broadcasts.
+        net_apis = [a for a in self.apis if re.search(
+            r"Route|Routing|Network\.(Router\.)?(LocalLan|Lan|LAN|VLAN|Vlan|MultiLan|Subnet|Interface|DHCP\.Server|Bridge)"
+            r"|Router\.(LocalLan|Lan|Topology)|DHCPServer|Dhcp\.Server", a) and not re.search(r"Client|Station|Log|IPv6|Ipv6", a)]
+        net_data = {api: self._try(raw, api, ("list", "get", "load")) for api in sorted(net_apis)[:16]}
+        networks = netinfo.networks_from_srm(net_data)
+        wifi_apis = [a for a in self.apis if re.search(r"Wifi|WiFi|WLAN|Wlan|Wireless|SSID|Ssid|Guest", a)
+                     and not re.search(r"Client|Station|Device|Survey|Scan|Neighbor|Log|Schedule|WPS\.PIN", a)]
+        wifi_data = {api: self._try(raw, api, ("get", "list", "load")) for api in sorted(wifi_apis)[:16]}
+        ssids = netinfo.ssids_from_srm(wifi_data)
+        findings += netinfo.ssid_findings(ssids)
+        neighbors = {c["ip"]: c["mac"] for c in clients if c.get("ip") and c.get("mac")}
+
         self._log_findings(findings, log_lines)
         if not clients:
             findings.append(finding("info", "wireless", "Client list not available from this SRM version",
@@ -552,8 +567,9 @@ class SRMSession:
             "interfaces": interfaces,
             "interfaces_note": "Error and drop counters aren't available through the Synology web API — connect with SSH (as root) for full counters.",
             "updates": {"manager": "SRM", "available": bool(avail)},
-            "apis": sorted(a for a in self.apis if a.startswith(("SYNO.Core.Network", "SYNO.Mesh", "SYNO.Core.System"))),
-            "raw": {k: json.dumps(v, indent=1)[:20000] for k, v in raw.items()},
+            "networks": networks, "ssids": ssids, "neighbors": neighbors,
+            "apis": sorted(a for a in self.apis if a.startswith(("SYNO.Core.Network", "SYNO.Mesh", "SYNO.Core.System", "SYNO.Wifi"))),
+            "raw": {k: json.dumps(netinfo.redact(v), indent=1)[:20000] for k, v in raw.items()},
             "connection": {"method": "SRM web API", "host": self.host, "port": self.port, "user": self.username,
                            "https": self.https},
         }

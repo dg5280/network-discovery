@@ -45,8 +45,8 @@ const Connect = {
     const hasSsh = (d.ports || []).includes(22);
     if (!f.port.value || ["22", "5000", "5001", "8000", "8001"].includes(f.port.value)) f.port.value = m === "ssh" ? "22" : this.webPort(d);
     $("method-hint").innerHTML = m === "ssh"
-      ? `Runs read-only commands: uptime, load, memory, disks, RAID, interface errors, kernel &amp; system logs, updates, and Wi-Fi clients if it's an access point.${hasSsh ? "" : " <b>Port 22 didn't answer during the scan</b> — SSH may be disabled on this device."}`
-      : `Signs in like the Synology web page (with 2-step verification). <b>NAS (DSM):</b> drives, SMART, pools, volumes, updates, logs. <b>Router (SRM):</b> Wi-Fi clients with signal strength. Ports: DSM 5000/5001, SRM 8000/8001 — HTTP vs HTTPS is detected automatically. Use an admin account.`;
+      ? `Runs read-only commands: uptime, load, memory, disks, RAID, interface errors, kernel &amp; system logs, updates, Wi-Fi clients if it's an access point, and on routers the route table (other subnets/VLANs) and the Wi-Fi networks it broadcasts.${hasSsh ? "" : " <b>Port 22 didn't answer during the scan</b> — SSH may be disabled on this device."}`
+      : `Signs in like the Synology web page (with 2-step verification). <b>NAS (DSM):</b> drives, SMART, pools, volumes, updates, logs. <b>Router (SRM):</b> Wi-Fi clients with signal strength, networks/VLANs and the SSIDs it broadcasts. Ports: DSM 5000/5001, SRM 8000/8001 — HTTP vs HTTPS is detected automatically. Use an admin account.`;
   },
   msg(text, kind = "error") {
     const m = $("connect-msg");
@@ -240,6 +240,7 @@ function reportHtml(sess, r) {
   let html = head + `<div class="stats tiles">${tiles.join("")}</div>`;
   html += `<section class="panel"><div class="panel-head"><h3>Findings</h3><span class="dim small">${r.findings.filter((f) => f.severity === "critical").length} critical · ${r.findings.filter((f) => f.severity === "warning").length} warnings</span></div>${findingsHtml(r.findings)}</section>`;
   html += clientsHtml(r.wireless);
+  html += reportNetworksHtml(r);
 
   if (r.disks && r.disks.length) {
     html += `<section class="panel"><div class="panel-head"><h3>Storage</h3></div><div class="table-wrap flat"><table><thead><tr><th>Mount</th><th>Filesystem</th><th style="width:34%">Used</th><th>Free</th><th>Size</th></tr></thead><tbody>
